@@ -1,5 +1,5 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const fs = require('fs');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const fs = require("fs");
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -22,29 +22,23 @@ Return ONLY valid JSON (no markdown, no explanation) in exactly this shape:
       "description": "string",
       "quantity": number,
       "unitPrice": number,
-      "mrp": number or null,
+      "mrp": number,
       "taxableValue": number,
-      "hsnCode": "string or null"
+      "hsnCode": "string"
     }
   ]
 }
-
-Rules:
-- itemCode must be the alphanumeric code from the table (e.g. "11423", "18004").
-- quantity is the ordered quantity.
-- Return numbers as numbers, not strings.
-- If a field is missing, use null.
 `;
 
 const GRN_PROMPT = `
-You are a document parser. Extract structured data from this Goods Receipt Note (GRN).
+You are a document parser. Extract structured data from this Goods Receipt Note document.
 Return ONLY valid JSON (no markdown, no explanation) in exactly this shape:
 
 {
   "grnNumber": "string",
   "poNumber": "string",
   "grnDate": "string",
-  "invoiceNumber": "string or null",
+  "invoiceNumber": "string",
   "vendorName": "string",
   "totalReceivedQty": number,
   "items": [
@@ -55,21 +49,15 @@ Return ONLY valid JSON (no markdown, no explanation) in exactly this shape:
       "quantity": number,
       "unitPrice": number,
       "taxableValue": number,
-      "hsnCode": "string or null",
-      "mrp": number or null
+      "hsnCode": "string",
+      "mrp": number
     }
   ]
 }
-
-Rules:
-- itemCode = SKU Code column value.
-- receivedQuantity = Recv Qty column.
-- quantity = Exp Qty column.
-- Return numbers as numbers, not strings.
 `;
 
 const INVOICE_PROMPT = `
-You are a document parser. Extract structured data from this Tax Invoice.
+You are a document parser. Extract structured data from this Invoice document.
 Return ONLY valid JSON (no markdown, no explanation) in exactly this shape:
 
 {
@@ -77,7 +65,7 @@ Return ONLY valid JSON (no markdown, no explanation) in exactly this shape:
   "poNumber": "string",
   "invoiceDate": "string",
   "vendorName": "string",
-  "vendorGstin": "string or null",
+  "vendorGstin": "string",
   "totalAmount": number,
   "totalTax": number,
   "items": [
@@ -87,57 +75,87 @@ Return ONLY valid JSON (no markdown, no explanation) in exactly this shape:
       "quantity": number,
       "unitPrice": number,
       "taxableValue": number,
-      "hsnCode": "string or null"
+      "hsnCode": "string"
     }
   ]
 }
-
-Rules:
-- poNumber comes from "Customer Order No." or PO No field.
-- Return numbers as numbers, not strings.
 `;
 
 function getPrompt(documentType) {
   switch (documentType) {
-    case 'po': return PO_PROMPT;
-    case 'grn': return GRN_PROMPT;
-    case 'invoice': return INVOICE_PROMPT;
-    default: throw new Error(`Unknown document type: ${documentType}`);
+    case "po":
+      return PO_PROMPT;
+
+    case "grn":
+      return GRN_PROMPT;
+
+    case "invoice":
+      return INVOICE_PROMPT;
+
+    default:
+      throw new Error(`Unknown document type: ${documentType}`);
   }
 }
 
 function cleanJson(text) {
-  return text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  return text
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
 }
 
 async function parseDocument(filePath, documentType) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-  const prompt = getPrompt(documentType);
-
-  const fileBuffer = fs.readFileSync(filePath);
-  const base64Data = fileBuffer.toString('base64');
-
-  const ext = filePath.split('.').pop().toLowerCase();
-  let mimeType = 'application/pdf';
-  if (['jpg', 'jpeg'].includes(ext)) mimeType = 'image/jpeg';
-  else if (ext === 'png') mimeType = 'image/png';
-
-  const result = await model.generateContent([
-    prompt,
-    { inlineData: { mimeType, data: base64Data } },
-  ]);
-
-  const rawText = result.response.text();
-  const cleaned = cleanJson(rawText);
-
-  let parsed;
   try {
-    parsed = JSON.parse(cleaned);
-  } catch (e) {
-    throw new Error(`Gemini returned invalid JSON: ${cleaned.slice(0, 300)}`);
-  }
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.0-flash"
+    });
 
-  return parsed;
+    const prompt = getPrompt(documentType);
+
+    const fileBuffer = fs.readFileSync(filePath);
+    const base64Data = fileBuffer.toString("base64");
+
+    const ext = filePath.split(".").pop().toLowerCase();
+
+    let mimeType = "application/pdf";
+
+    if (["jpg", "jpeg"].includes(ext)) {
+      mimeType = "image/jpeg";
+    } else if (ext === "png") {
+      mimeType = "image/png";
+    }
+
+    const result = await model.generateContent([
+      prompt,
+      {
+        inlineData: {
+          mimeType,
+          data: base64Data
+        }
+      }
+    ]);
+
+    const rawText = result.response.text();
+    console.log("Gemini Raw Response:", rawText);
+
+    const cleaned = cleanJson(rawText);
+
+    let parsedData;
+
+    try {
+      parsedData = JSON.parse(cleaned);
+    } catch (error) {
+      throw new Error(
+        `Gemini returned invalid JSON: ${cleaned.slice(0, 300)}`
+      );
+    }
+
+    return parsedData;
+
+  } catch (error) {
+    throw new Error(`Gemini parsing failed: ${error.message}`);
+  }
 }
 
 module.exports = { parseDocument };
