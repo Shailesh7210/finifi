@@ -17,7 +17,10 @@ function parseDate(dateStr) {
 }
 
 function normaliseKey(code) {
-  return String(code || '').trim().toLowerCase().replace(/[-_\s]+/g, '');
+  return String(code || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[-_\s]+/g, '');
 }
 
 function aggregateGrnQty(grns) {
@@ -45,7 +48,16 @@ async function runMatch(poNumber) {
   if (allPOs.length > 1) {
     return MatchResult.findOneAndUpdate(
       { poNumber },
-      { poNumber, hasPO, hasGRN, hasInvoice, status: 'mismatch', reasons: ['duplicate_po'], itemResults: [], lastUpdated: new Date() },
+      {
+        poNumber,
+        hasPO,
+        hasGRN,
+        hasInvoice,
+        status: 'mismatch',
+        reasons: ['duplicate_po'],
+        itemResults: [],
+        lastUpdated: new Date(),
+      },
       { upsert: true, new: true }
     );
   }
@@ -56,9 +68,19 @@ async function runMatch(poNumber) {
     if (!hasPO) missing.push('PO');
     if (!hasGRN) missing.push('GRN');
     if (!hasInvoice) missing.push('Invoice');
+
     return MatchResult.findOneAndUpdate(
       { poNumber },
-      { poNumber, hasPO, hasGRN, hasInvoice, status: 'insufficient_documents', reasons: [`Waiting for: ${missing.join(', ')}`], itemResults: [], lastUpdated: new Date() },
+      {
+        poNumber,
+        hasPO,
+        hasGRN,
+        hasInvoice,
+        status: 'insufficient_documents',
+        reasons: [`Waiting for: ${missing.join(', ')}`],
+        itemResults: [],
+        lastUpdated: new Date(),
+      },
       { upsert: true, new: true }
     );
   }
@@ -79,17 +101,23 @@ async function runMatch(poNumber) {
   for (const inv of invoices) {
     const invDate = parseDate(inv.invoiceDate);
     if (poDateParsed && invDate && invDate > poDateParsed) {
-      globalReasons.push(`invoice_date_after_po_date (invoice ${inv.invoiceNumber})`);
+      globalReasons.push(
+        `invoice_date_after_po_date (invoice ${inv.invoiceNumber})`
+      );
     }
     for (const item of inv.items || []) {
       const key = normaliseKey(item.itemCode);
-      invoiceItemMap.set(key, (invoiceItemMap.get(key) || 0) + (item.quantity || 0));
+      invoiceItemMap.set(
+        key,
+        (invoiceItemMap.get(key) || 0) + (item.quantity || 0)
+      );
     }
   }
 
   let hasAnyMismatch = false;
   let hasAnyMatch = false;
 
+  // Validate each PO item
   for (const [key, poItem] of poItemMap) {
     const poQty = poItem.quantity || 0;
     const grnQty = grnQtyMap.get(key) || 0;
@@ -116,7 +144,7 @@ async function runMatch(poNumber) {
     });
   }
 
-  // Items in invoice not in PO
+  // Check invoice items not in PO
   for (const [key, invoiceQty] of invoiceItemMap) {
     if (!poItemMap.has(key)) {
       globalReasons.push(`item_missing_in_po (key: ${key})`);
@@ -133,15 +161,32 @@ async function runMatch(poNumber) {
     }
   }
 
-  const allReasons = [...globalReasons, ...itemResults.flatMap((r) => r.issues)];
+  const allReasons = [
+    ...globalReasons,
+    ...itemResults.flatMap((r) => r.issues),
+  ];
+
   let status;
-  if (allReasons.length === 0) status = 'matched';
-  else if (hasAnyMatch && hasAnyMismatch) status = 'partially_matched';
-  else status = 'mismatch';
+  if (allReasons.length === 0) {
+    status = 'matched';
+  } else if (hasAnyMatch && hasAnyMismatch) {
+    status = 'partially_matched';
+  } else {
+    status = 'mismatch';
+  }
 
   return MatchResult.findOneAndUpdate(
     { poNumber },
-    { poNumber, hasPO, hasGRN, hasInvoice, status, reasons: allReasons, itemResults, lastUpdated: new Date() },
+    {
+      poNumber,
+      hasPO,
+      hasGRN,
+      hasInvoice,
+      status,
+      reasons: allReasons,
+      itemResults,
+      lastUpdated: new Date(),
+    },
     { upsert: true, new: true }
   );
 }

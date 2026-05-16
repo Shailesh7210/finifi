@@ -66,9 +66,17 @@ const documentSchema = new mongoose.Schema(
   {
     filename: { type: String },
     originalName: { type: String },
-    documentType: { type: String, enum: ['po', 'grn', 'invoice'], required: true },
+    documentType: {
+      type: String,
+      enum: ['po', 'grn', 'invoice'],
+      required: true,
+    },
     poNumber: { type: String, index: true },
-    parseStatus: { type: String, enum: ['pending', 'parsed', 'failed'], default: 'pending' },
+    parseStatus: {
+      type: String,
+      enum: ['pending', 'parsed', 'failed'],
+      default: 'pending',
+    },
     parseError: { type: String },
     parsedData: { type: mongoose.Schema.Types.Mixed },
     typedDocumentId: { type: mongoose.Schema.Types.ObjectId },
@@ -81,7 +89,12 @@ const matchResultSchema = new mongoose.Schema(
     poNumber: { type: String, required: true, unique: true, index: true },
     status: {
       type: String,
-      enum: ['matched', 'partially_matched', 'mismatch', 'insufficient_documents'],
+      enum: [
+        'matched',
+        'partially_matched',
+        'mismatch',
+        'insufficient_documents',
+      ],
       default: 'insufficient_documents',
     },
     hasPO: { type: Boolean, default: false },
