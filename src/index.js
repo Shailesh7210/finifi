@@ -2,14 +2,12 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 
-
-const  dns = require('dns')
-
 const documentRoutes = require('./routes/documents');
 const matchRoutes = require('./routes/match');
 const errorHandler = require('./middleware/errorHandler');
+const dns = require('dns')
 
-dns.setServers(["8.8.8.8", "8.8.4.4"])
+dns.setServers(["0.0.0.0", "8.8.4.4"])
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,27 +21,24 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-
+// Temporary: list available Gemini models
 app.get('/models', async (req, res) => {
   try {
-    const { GoogleGenerativeAI } = require('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GOOGLE_API_KEY}`
     );
     const data = await response.json();
-    
     const models = data.models
       ?.filter(m => m.supportedGenerationMethods?.includes('generateContent'))
-      .map(m => m.name);
-    
-    res.json({ available_models: models });
+      .map(m => ({
+        name: m.name,
+        displayName: m.displayName,
+      }));
+    res.json({ models });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 app.use(errorHandler);
 
