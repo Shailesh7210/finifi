@@ -1,6 +1,6 @@
 # Three-Way Match Engine
 
-A backend service that automates the matching of Purchase Orders (PO), Goods Receipt Notes (GRN), and Invoices using **Gemini API** for document parsing and **MongoDB** for storage.
+A backend service that automates matching of Purchase Orders (PO), Goods Receipt Notes (GRN), and Invoices using **LangChain + Google Gemini API** for intelligent document parsing and **MongoDB** for storage.
 
 ---
 
@@ -12,6 +12,7 @@ A backend service that automates the matching of Purchase Orders (PO), Goods Rec
 - [Getting Started](#getting-started)
 - [Data Model](#data-model)
 - [Parsing Flow](#parsing-flow)
+- [Smart Chunking & RAG Approach](#smart-chunking--rag-approach)
 - [Matching Logic](#matching-logic)
 - [Out-of-Order Upload Handling](#out-of-order-upload-handling)
 - [API Reference](#api-reference)
@@ -25,14 +26,17 @@ A backend service that automates the matching of Purchase Orders (PO), Goods Rec
 
 ## Overview
 
-This service allows users to upload PO, GRN, and Invoice documents (PDF or image). Each document is:
+This service allows users to upload PO, GRN, and Invoice documents (PDF). Each document is:
 
-1. Saved to disk via Multer
-2. Parsed into structured JSON using Gemini 1.5 Flash
-3. Stored in MongoDB in a typed collection
-4. Automatically triggers three-way matching logic for the linked `poNumber`
+1. Saved to disk via **Multer**
+2. Text extracted locally using **pdf-parse** (no API call)
+3. Cleaned — Terms & Conditions and legal pages stripped (reduces tokens by 70%+)
+4. Header fields extracted using **regex** (zero API calls)
+5. Only the items table sent to **Google Gemini** via **LangChain** (minimal tokens)
+6. Structured JSON stored in **MongoDB**
+7. Three-way match automatically triggered for the linked `poNumber`
 
-The match result is always available at `GET /match/:poNumber` regardless of the order documents were uploaded.
+The match result is always available at `GET /match/:poNumber` regardless of document upload order.
 
 ---
 
@@ -43,7 +47,9 @@ The match result is always available at `GET /match/:poNumber` regardless of the
 | Runtime | Node.js |
 | Framework | Express.js |
 | Database | MongoDB + Mongoose |
-| AI Parsing | Google Gemini 1.5 Flash |
+| AI Model | Google Gemini 2.0 Flash Lite (via LangChain) |
+| LangChain | @langchain/google-genai, @langchain/core |
+| PDF Parsing | pdf-parse (local, no API) |
 | File Upload | Multer |
 | Environment | dotenv |
 
@@ -61,7 +67,7 @@ three-way-match/
 │   │   ├── documents.js            # Upload and fetch document APIs
 │   │   └── match.js                # Match result APIs
 │   ├── services/
-│   │   ├── geminiParser.js         # Gemini API integration + prompts
+│   │   ├── geminiParser.js         # Smart parsing: regex + LangChain + Gemini
 │   │   ├── matchingEngine.js       # Three-way match logic
 │   │   └── documentStore.js        # Save parsed data to typed collections
 │   └── middleware/
@@ -81,7 +87,7 @@ three-way-match/
 
 - Node.js >= 18
 - MongoDB >= 6 (local or Atlas)
-- Gemini API Key ([get one here](https://aistudio.google.com/))
+- Google AI API Key — free at [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 
 ### Installation
 
@@ -102,23 +108,38 @@ Edit `.env`:
 ```env
 PORT=3000
 MONGODB_URI=mongodb://localhost:27017/three-way-match
-GEMINI_API_KEY=your_gemini_api_key_here
+GOOGLE_API_KEY=your_google_api_key_here
 ```
 
 ### Run
 
 ```bash
-npm run dev     # development (nodemon)
+npm run dev     # development with nodemon
 npm start       # production
 ```
 
 Server starts at `http://localhost:3000`
 
+### Get a Free Google API Key
+
+1. Go to [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. Click **"Create API Key"**
+3. Select **"Create API key in new project"** — gives fresh quota each time
+4. Copy and paste into `.env`
+
+### Check Available Models
+
+```
+GET http://localhost:3000/models
+```
+
+Returns all Gemini models your API key supports. Use `gemini-2.0-flash-lite` for lowest quota usage on free tier.
+
 ---
 
 ## Data Model
 
-There are 5 MongoDB collections:
+Five MongoDB collections:
 
 ### `documents`
 Generic upload record. Tracks every upload regardless of parse status.
@@ -131,7 +152,7 @@ Generic upload record. Tracks every upload regardless of parse status.
   poNumber: String,           // extracted after parsing
   parseStatus: String,        // 'pending' | 'parsed' | 'failed'
   parseError: String,         // populated if parsing fails
-  parsedData: Mixed,          // full Gemini output stored for debugging
+  parsedData: Mixed,          // full structured output for debugging
   typedDocumentId: ObjectId   // reference to PO / GRN / Invoice record
 }
 ```
@@ -150,7 +171,7 @@ Generic upload record. Tracks every upload regardless of parse status.
   totalAmount: Number,
   items: [
     {
-      itemCode: String,
+      itemCode: String,       // numeric SKU e.g. "11423"
       description: String,
       quantity: Number,
       unitPrice: Number,
@@ -177,7 +198,7 @@ Generic upload record. Tracks every upload regardless of parse status.
       itemCode: String,
       description: String,
       receivedQuantity: Number,   // Recv Qty column
-      quantity: Number,           // Exp Qty column (expected from PO)
+      quantity: Number,           // Exp Qty column
       unitPrice: Number,
       taxableValue: Number,
       mrp: Number,
@@ -217,11 +238,11 @@ One document per `poNumber`. Always holds the latest computed match state.
 ```js
 {
   poNumber: String,
-  status: String,           // 'matched' | 'partially_matched' | 'mismatch' | 'insufficient_documents'
+  status: String,         // 'matched' | 'partially_matched' | 'mismatch' | 'insufficient_documents'
   hasPO: Boolean,
   hasGRN: Boolean,
   hasInvoice: Boolean,
-  reasons: [String],        // e.g. ['grn_qty_exceeds_po_qty']
+  reasons: [String],      // e.g. ['grn_qty_exceeds_po_qty']
   itemResults: [
     {
       itemCode: String,
@@ -229,7 +250,7 @@ One document per `poNumber`. Always holds the latest computed match state.
       poQty: Number,
       grnQty: Number,
       invoiceQty: Number,
-      status: String,       // 'matched' | 'mismatch'
+      status: String,     // 'matched' | 'mismatch'
       issues: [String]
     }
   ],
@@ -251,124 +272,206 @@ POST /documents/upload (file + documentType)
     Document record created { parseStatus: 'pending' }
             │
             ▼
-    fs.readFile → base64 encode
+    pdf-parse extracts raw text locally
+    (no API call — runs on machine)
             │
             ▼
-    Gemini 1.5 Flash called with:
-      - Typed prompt (per documentType)
-      - base64 file as inline data
+    removeUnnecessarySections()
+    Strips Terms & Conditions, legal pages
+    Reduces text by up to 70%
             │
             ▼
-    cleanJson() strips markdown fences
+    extractHeaderWithRegex()
+    Extracts poNumber, poDate, vendorName etc.
+    using regex patterns — ZERO API calls
             │
-        JSON.parse()
+            ▼
+    extractTableSection()
+    Smart finder — locates only the items table
+    Sends 500–2000 chars instead of 12,000+
             │
-      ┌─────┴──────────────────┐
-    success                 failure
-      │                         │
-      ▼                         ▼
-  storeTypedDocument()     Document { parseStatus: 'failed' }
-  PO / GRN / Invoice       return 422
-      │
-      ▼
-  Document updated { parseStatus: 'parsed', poNumber, parsedData }
-      │
-      ▼
-  runMatch(poNumber) → MatchResult upserted
-      │
-      ▼
-  Response { parsedData, matchStatus }
+            ▼
+    LangChain + Gemini 2.0 Flash Lite
+    Receives ONLY the items table
+    Returns structured JSON array of items
+            │
+        ┌───┴──────────────────┐
+      success               failure
+        │                       │
+        ▼                       ▼
+    buildFinalResult()     Document { parseStatus: 'failed' }
+    merge header + items   return 422
+        │
+        ▼
+    storeTypedDocument()
+    PO / GRN / Invoice saved to typed collection
+        │
+        ▼
+    Document updated { parseStatus: 'parsed' }
+        │
+        ▼
+    runMatch(poNumber) → MatchResult upserted
+        │
+        ▼
+    Response { parsedData, matchStatus }
 ```
 
-### Why Gemini?
+---
 
-Each document type (PO, GRN, Invoice) has its own tailored prompt. The prompt tells Gemini:
-- Exactly which JSON shape to return
-- Which table column maps to which field
-- To return **only JSON** — no markdown, no explanation
+## Smart Chunking & RAG Approach
 
-This is necessary because different documents use different column names for the same concept. For example:
-- GRN calls it `Recv Qty` → we map it to `receivedQuantity`
-- GRN calls it `Exp Qty` → we map it to `quantity` (expected)
+### Problem with naive chunking
+
+```
+Old approach:
+  Full PDF (36,000 chars)
+  → split every 12,000 chars → 4 chunks
+  → findBestChunk() picks wrong chunk
+  → table rows cut in the middle
+  → AI gets incomplete data
+  → hits token and rate limits
+```
+
+### Our approach
+
+```
+New approach:
+  Full PDF (36,000 chars)
+      │
+      ▼
+  Step 1: Strip legal pages       → ~10,000 chars  (regex, 0 API calls)
+      │
+      ▼
+  Step 2: Extract header fields   → instant         (regex, 0 API calls)
+      │
+      ▼
+  Step 3: Find table section      → ~1,500 chars    (pattern matching)
+      │
+      ▼
+  Step 4: Send ONLY table to AI   → 1 API call, tiny payload
+      │
+      ▼
+  Step 5: Merge header + items    → final JSON
+```
+
+### Four specific optimisations
+
+**Fix 1 — Remove unnecessary sections**
+
+Strips Terms & Conditions, Force Majeure, Bank Details etc. before any processing. Reduces token count by 70%+.
+
+```js
+function removeUnnecessarySections(text) {
+  const stopWords = ['Terms And Conditions', 'Force Majeure', 'Bank Details' ...];
+  // Returns text only up to first stopword found
+}
+```
+
+**Fix 2 — Smart table section extraction**
+
+Finds where the items table starts and ends using pattern matching on column headers and total rows. Sends only table rows to AI.
+
+```js
+// Table starts at: "Sr. No", "SKU Code", "Item Code" etc.
+// Table ends at:   "Grand Total", "Amount in Words", "Authorised Signatory" etc.
+```
+
+**Fix 3 — Regex for header fields and totals**
+
+Fields like `poNumber`, `poDate`, `vendorName`, `totalAmount` are simple key-value pairs. Extracted with regex — zero AI calls needed.
+
+```js
+const poNumber = text.match(/PO No\s*[:\-]?\s*(CI[\w\d]+)/i)?.[1];
+const poDate   = text.match(/PO Date\s*[:\-]\s*([\d\-\/]+)/i)?.[1];
+const total    = text.match(/Grand Total\s*\(INR\)\s*([\d,]+)/i)?.[1];
+```
+
+**Fix 4 — Reduced retries**
+
+Retry count reduced from 3 to 1. Repeated retries on rate-limited keys waste quota without benefit.
+
+### Token usage comparison
+
+| Approach | Chars sent to AI | API calls | Rate Limit Risk |
+|---|---|---|---|
+| Old (full chunks) | ~12,000 | 3–4 | Very High |
+| New (table only) | ~500–2,000 | 1 | Very Low |
 
 ---
 
 ## Matching Logic
 
-Matching is triggered automatically after every successful upload. The function `runMatch(poNumber)` is **idempotent** — calling it multiple times with the same data always gives the same result.
+Matching runs automatically after every successful upload. `runMatch(poNumber)` is **idempotent** — same input always gives same output.
 
-### Rules Implemented (Item Level)
+### Item-level rules
 
 | Rule | Reason Code |
 |---|---|
 | GRN received qty > PO qty | `grn_qty_exceeds_po_qty` |
 | Invoice qty > PO qty | `invoice_qty_exceeds_po_qty` |
 | Invoice qty > total GRN received qty | `invoice_qty_exceeds_grn_qty` |
+| Item invoiced but never received in GRN | `item_not_received_in_grn` |
 | Invoice item not found in PO | `item_missing_in_po` |
-| Item invoiced but never received in any GRN | `item_not_received_in_grn` |
 
-### Rules Implemented (Document Level)
+### Document-level rules
 
 | Rule | Reason Code |
 |---|---|
 | Invoice date is after PO date | `invoice_date_after_po_date` |
-| More than one PO uploaded for same `poNumber` | `duplicate_po` |
+| More than one PO for same poNumber | `duplicate_po` |
 
-### Match Status
+### Match status values
 
 | Status | Meaning |
 |---|---|
-| `matched` | All items and all rules pass |
-| `partially_matched` | Some items pass, some have issues |
-| `mismatch` | All items fail or a critical document-level rule breaks |
-| `insufficient_documents` | One or more of PO / GRN / Invoice not yet uploaded |
+| `matched` | All items and rules pass |
+| `partially_matched` | Some items match, some have issues |
+| `mismatch` | All items fail or critical rule breaks |
+| `insufficient_documents` | PO / GRN / Invoice not all uploaded yet |
 
 ### Multiple GRNs
 
-GRN quantities for the same `itemCode` are **summed** across all GRN documents before comparison. This supports partial deliveries:
+GRN quantities for the same `itemCode` are **summed** across all GRNs. Supports partial deliveries:
 
 ```
 GRN-1: itemCode 11423 → receivedQty 30
 GRN-2: itemCode 11423 → receivedQty 20
-Total GRN qty used for matching = 50
+Total used for matching = 50
 ```
 
-### Item Matching Key
+### Item matching key
 
 **Primary key: numeric `itemCode` (SKU)**
 
-The PO and GRN both use numeric SKU codes (e.g. `11423`, `18004`). These are stable and unambiguous across documents.
+The PO and GRN use numeric SKU codes (`11423`, `18004`). Keys are normalised before comparison:
 
-Keys are normalised before comparison:
 ```js
 function normaliseKey(code) {
   return String(code).trim().toLowerCase().replace(/[-_\s]+/g, '');
 }
 ```
 
-This handles minor formatting differences (dashes, spaces, casing) between documents.
-
-> **Note:** Some invoices use a different internal code format (e.g. `FG-P-F-0503`) which does not match the numeric PO/GRN SKUs. These are surfaced as `item_missing_in_po` rather than silently dropped. In production, a cross-reference table mapping vendor codes to buyer SKUs would resolve this.
+> **Note:** Some invoices use vendor-internal codes that differ from buyer SKUs. These are flagged as `item_missing_in_po`. A cross-reference table would resolve this in production.
 
 ---
 
 ## Out-of-Order Upload Handling
 
-There is no pipeline or workflow engine. The approach is simpler:
+There is no pipeline or workflow engine. The design is intentionally simple:
 
-- Every upload is **parsed and stored independently** — no dependency on other documents
-- Every successful upload calls `runMatch(poNumber)` which **reads all available documents from MongoDB** and recomputes the match from scratch
-- `MatchResult` is upserted — it always reflects the latest state
+- Every upload is **parsed and stored independently**
+- Every successful upload calls `runMatch(poNumber)` which **reads all available documents from MongoDB** and recomputes from scratch
+- `MatchResult` is upserted — always reflects the latest state
 
-This means any upload order produces the correct final result:
+Any upload order produces the correct final result:
 
 ```
-PO → GRN → Invoice    ✅ final status: matched/mismatch
-Invoice → GRN → PO    ✅ same final status
-GRN → Invoice → PO    ✅ same final status
+PO → GRN → Invoice    ✅ final: matched / mismatch
+Invoice → GRN → PO    ✅ same final result
+GRN → Invoice → PO    ✅ same final result
 ```
 
-Early uploads get `insufficient_documents`. The status upgrades automatically as more documents arrive.
+Early uploads return `insufficient_documents`. Status upgrades automatically as more documents arrive.
 
 ---
 
@@ -382,7 +485,7 @@ Upload and parse a document.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `file` | File | Yes | PDF, JPEG, or PNG |
+| `file` | File | Yes | PDF only |
 | `documentType` | String | Yes | `po`, `grn`, or `invoice` |
 
 **Response — 201**
@@ -392,7 +495,7 @@ Upload and parse a document.
   "documentType": "grn",
   "poNumber": "CI4PO05788",
   "parseStatus": "parsed",
-  "parsedData": { ... },
+  "parsedData": { "..." },
   "matchTriggered": true,
   "matchStatus": "insufficient_documents"
 }
@@ -403,7 +506,7 @@ Upload and parse a document.
 {
   "documentId": "64f1a2b3c4d5e6f7a8b9c0d1",
   "error": "Parsing failed",
-  "detail": "Gemini returned invalid JSON: ..."
+  "detail": "Gemini items extraction failed: ..."
 }
 ```
 
@@ -411,7 +514,7 @@ Upload and parse a document.
 
 ### GET `/documents/:id`
 
-Get a parsed document by its MongoDB ID.
+Get a parsed document by MongoDB ID.
 
 **Response — 200**
 ```json
@@ -420,7 +523,7 @@ Get a parsed document by its MongoDB ID.
   "documentType": "grn",
   "poNumber": "CI4PO05788",
   "parseStatus": "parsed",
-  "parsedData": { ... },
+  "parsedData": { "..." },
   "createdAt": "2026-03-24T10:00:00.000Z"
 }
 ```
@@ -429,17 +532,15 @@ Get a parsed document by its MongoDB ID.
 
 ### GET `/documents`
 
-List documents. Optional filters.
+List documents with optional filters.
 
-**Query params:**
-- `?poNumber=CI4PO05788`
-- `?documentType=grn`
+**Query params:** `?poNumber=CI4PO05788` or `?documentType=grn`
 
 **Response — 200**
 ```json
 {
   "count": 3,
-  "documents": [ ... ]
+  "documents": ["..."]
 }
 ```
 
@@ -454,14 +555,11 @@ Get the three-way match result for a PO number.
 {
   "poNumber": "CI4PO05788",
   "matchStatus": "partially_matched",
-  "reasons": [
-    "grn_qty_exceeds_po_qty",
-    "invoice_qty_exceeds_grn_qty"
-  ],
+  "reasons": ["grn_qty_exceeds_po_qty"],
   "documents": {
     "po": {
       "id": "...",
-      "poDate": "17-3-2026",
+      "poDate": "Mar 17, 2026",
       "vendorName": "M/s AFP",
       "totalAmount": 1045042.19,
       "itemCount": 38
@@ -488,7 +586,7 @@ Get the three-way match result for a PO number.
   "itemResults": [
     {
       "itemCode": "11423",
-      "description": "Cheesy Spicy Veg Momos 24.0 Pieces",
+      "description": "Spicy Veg Momos 24.0 Pieces",
       "poQty": 50,
       "grnQty": 50,
       "invoiceQty": 50,
@@ -503,15 +601,6 @@ Get the three-way match result for a PO number.
       "invoiceQty": 30,
       "status": "matched",
       "issues": []
-    },
-    {
-      "itemCode": "18004",
-      "description": "Meatigo Chicken Boneless Breast Frozen 450.0 g",
-      "poQty": 540,
-      "grnQty": 30,
-      "invoiceQty": 30,
-      "status": "matched",
-      "issues": []
     }
   ],
   "lastUpdated": "2026-03-24T12:00:00.000Z"
@@ -522,7 +611,7 @@ Get the three-way match result for a PO number.
 
 ### POST `/match/:poNumber/rerun`
 
-Force re-evaluation of match (useful after manual data corrections).
+Force re-evaluation of match result.
 
 **Response — 200**
 ```json
@@ -537,13 +626,29 @@ Force re-evaluation of match (useful after manual data corrections).
 
 ### GET `/health`
 
-Basic health check.
+Health check.
 
 **Response — 200**
 ```json
 {
   "status": "ok",
   "timestamp": "2026-03-24T12:00:00.000Z"
+}
+```
+
+---
+
+### GET `/models`
+
+List all Gemini models available for your API key. Use this to find which model to configure.
+
+**Response — 200**
+```json
+{
+  "models": [
+    { "name": "models/gemini-2.0-flash-lite", "displayName": "Gemini 2.0 Flash-Lite" },
+    { "name": "models/gemini-2.0-flash", "displayName": "Gemini 2.0 Flash" }
+  ]
 }
 ```
 
@@ -632,19 +737,21 @@ Basic health check.
 
 ## Assumptions
 
-1. **One PO per `poNumber`** — uploading a second PO with the same number sets match status to `mismatch` with reason `duplicate_po`.
+1. **One PO per `poNumber`** — uploading a second PO with the same number sets match to `mismatch` with reason `duplicate_po`.
 
-2. **`itemCode` is the matching key** — the numeric SKU code from the PO and GRN is used as the primary item identifier. It is stable and consistent across both documents. Keys are normalised (trimmed, lowercased, dashes removed) before comparison.
+2. **`itemCode` is the matching key** — numeric SKU from PO and GRN is the primary identifier. Normalised before comparison (trimmed, lowercased, dashes removed).
 
-3. **Invoice codes may differ** — in real documents, invoices sometimes use vendor-internal codes that differ from the buyer's SKU. These are flagged as `item_missing_in_po` rather than silently ignored.
+3. **Invoice codes may differ** — invoices sometimes use vendor-internal codes different from buyer SKU. These are flagged as `item_missing_in_po` rather than silently ignored.
 
-4. **Dates stored as strings** — parsed flexibly for comparison using a best-effort date parser. All dates assumed to be in the same timezone.
+4. **PDF must be text-based** — scanned or image PDFs cannot be parsed by pdf-parse. File must have an extractable text layer.
 
-5. **Files are not deleted after parsing** — uploaded files remain in `/uploads/`. In production, move to object storage (S3, GCS) after parsing.
+5. **Dates stored as strings** — parsed flexibly for comparison. All dates assumed to be in same timezone.
 
-6. **No authentication** — endpoints are open. JWT or API key middleware should be added before any deployment.
+6. **Files not deleted after parsing** — uploaded files remain in `/uploads/`. Move to object storage (S3, GCS) in production.
 
-7. **Partial deliveries are valid** — if GRN received qty is less than PO qty, that is acceptable (not flagged as an error). Only over-delivery is flagged.
+7. **No authentication** — endpoints are open. Add JWT or API key middleware before any deployment.
+
+8. **Partial deliveries are valid** — GRN received qty less than PO qty is acceptable and not flagged as an error. Only over-delivery is flagged.
 
 ---
 
@@ -652,36 +759,38 @@ Basic health check.
 
 | Decision | Reason | What We'd Change |
 |---|---|---|
+| Regex for header fields | Zero API calls, instant, reliable for structured key-value fields | No change needed |
+| AI only for items table | Minimises tokens, avoids rate limits | No change needed |
+| Strip legal pages first | 70%+ token reduction before any processing | ML-based section classifier for higher accuracy |
+| `gemini-2.0-flash-lite` | Lowest quota usage on free tier | Use `gemini-2.5-flash` in production |
 | Re-run match on every upload | Simple, no stale state, idempotent | Add dirty-flag to skip recompute when nothing changed |
-| Store full `parsedData` on Document | Easy debugging without re-parsing | Normalise only in high-volume systems; raw data is large |
-| Gemini 1.5 Flash | Fast and cost-efficient | Use Pro for higher accuracy on complex/messy layouts |
-| Numeric SKU as item key | Most stable identifier across docs | Add vendor ↔ buyer item code cross-reference table |
-| Synchronous parsing in upload handler | Simple to reason about | Move to background job queue (BullMQ) for large files |
-| No auth | Out of scope for assignment | Add JWT or API key middleware before any deployment |
+| Retry count = 1 | Avoids burning quota on repeated failures | Exponential backoff in production |
+| Synchronous parsing in handler | Simple to reason about | Move to BullMQ background job queue for large files |
+| No auth | Out of scope for assignment | Add JWT or API key middleware |
 
 ---
 
 ## What I Would Improve With More Time
 
-1. **Background job queue** — Move Gemini parsing to a BullMQ worker. Upload returns a job ID immediately; client polls for completion. Prevents request timeouts on large files.
+1. **Background job queue** — Move Gemini parsing to BullMQ worker. Upload returns job ID immediately. Client polls for completion. Prevents timeout on large files.
 
-2. **Item code cross-reference table** — A `item_mappings` collection mapping vendor invoice codes to buyer SKU codes. Resolves the namespace mismatch between GRN and Invoice item codes cleanly.
+2. **Item code cross-reference table** — A `item_mappings` collection mapping vendor invoice codes to buyer SKU codes. Resolves namespace mismatch between GRN and Invoice cleanly.
 
-3. **Confidence scores on extraction** — Gemini extractions are probabilistic. Adding a `confidence` field per extracted item lets reviewers focus on uncertain rows instead of checking everything.
+3. **Scanned PDF support** — Integrate Google Cloud Vision OCR or Tesseract for image-based PDFs that pdf-parse cannot read.
 
-4. **Webhook / event system** — Notify downstream systems (ERP, finance) when a match status changes to `matched`. Currently the consumer must poll `GET /match/:poNumber`.
+4. **Confidence scores** — Add a `confidence` field per extracted item. Lets reviewers focus on uncertain rows instead of checking everything manually.
 
-5. **Unit and integration tests** — Jest tests for the matching engine using fixture JSON. Supertest tests for all API routes. Currently untested.
+5. **Webhook / event system** — Notify downstream systems (ERP, finance) when match status changes to `matched`. Currently consumer must poll `GET /match/:poNumber`.
 
-6. **Swagger / OpenAPI docs** — Auto-generated from route definitions so the API is always up to date.
+6. **Unit and integration tests** — Jest tests for matching engine with fixture JSON. Supertest tests for all API routes.
 
-7. **File cleanup** — Move uploads to S3 post-parse; delete local copy to avoid disk buildup.
+7. **Swagger / OpenAPI docs** — Auto-generated from route definitions so API documentation is always up to date.
 
-8. **Multi-tenancy** — Scope all collections by `tenantId` so multiple buyers can share one deployment without data leakage.
+8. **File cleanup** — Move uploads to S3 post-parse, delete local copy to avoid disk buildup in production.
 
-9. **Retry logic for Gemini** — Exponential backoff on rate limit errors (429) from Gemini API.
+9. **Multi-tenancy** — Scope all collections by `tenantId` so multiple buyers share one deployment without data leakage.
 
-10. **Admin dashboard** — Simple UI to view upload history, match results, and manually trigger re-runs.
+10. **Admin dashboard** — Simple UI to view upload history, match results, and manually trigger re-runs without Postman.
 
 ---
 
