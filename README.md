@@ -1,3 +1,6 @@
+# Three-Way Match Engine
+
+A backend service that automates matching of Purchase Orders (PO), Goods Receipt Notes (GRN), and Invoices using **LangChain + Google Gemini API** for intelligent document parsing and **MongoDB** for storage.
 
 ---
 
